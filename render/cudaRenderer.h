@@ -3,6 +3,7 @@
 
 #ifndef uint
 #define uint unsigned int
+#define DEBUG
 #endif
 
 #include "circleRenderer.h"

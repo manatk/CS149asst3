@@ -462,8 +462,6 @@ __global__ void kernelRenderCircles() {
     }
 }
 
-
-
 __global__ void manat_render_circles_sectioned_parallel() {
     
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
@@ -478,8 +476,7 @@ __global__ void manat_render_circles_sectioned_parallel() {
                                             invHeight * (static_cast<float>(pixelY) + 0.5f));
     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
 
-    // int numCircles = cuConstRendererParams.numCircles;
-    int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
+    int numCircles = cuConstRendererParams.numCircles;
 
     float boxL = invWidth * pixelX - 0.5f;
     float boxR = invWidth * (pixelX + 1) + 0.5f;
@@ -487,7 +484,7 @@ __global__ void manat_render_circles_sectioned_parallel() {
     float boxT = invHeight * (pixelY + 1) + 0.5f;
     
     for (int i = 0; i < circlesPerSection[sectionNumber]; i++) {
-        int circleIndex = indicesToCheck[sectionNumber * maxCircleOverlap + i];
+        int circleIndex = indicesToCheck[sectionNumber * cuConstRendererParams.maxCircleOverlap + i];
         int index3 = 3 * circleIndex;
 
         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
@@ -671,67 +668,6 @@ __global__ void manat_render_circles() {
 //     }
 // }
 
-// __global__ void prerender_circles_parallel() {
-//     int imageWidth = cuConstRendererParams.imageWidth;
-//     int imageHeight = cuConstRendererParams.imageHeight;
-//     int numCircles = cuConstRendererParams.numCircles;
-//     int sectionSize = cuConstRendererParams.sectionSize;
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-
-//     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
-//     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
-//     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
-//     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-
-//     __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
-
-//     int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-    
-//     int thisThreadCirclesProcessed = 0;
-//     int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
-//     int startCircle = threadId * circlesPerThread;
-//     int endCircle = min(startCircle + circlesPerThread, numCircles);
-
-    
-//     for (int i = startCircle; i < endCircle; i++) {
-//         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
-//         float radius = cuConstRendererParams.radius[i];
-//         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-//             circleInBoxFlags[(sectionNumber * numCircles) + i] = true;
-//             thisThreadCirclesProcessed++;
-//         }
-//     }
-
-//     // Store count in scan input
-//     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
-//     __syncthreads();
-    
-//     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
-//     __syncthreads();
-
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-
-//     int writePos = exclusiveScanOutput[threadId];
-//     int circlesWritten = 0;
-//     for (int i = startCircle; i < endCircle; i++) {
-//         if (circleInBoxFlags[sectionNumber * numCircles + i]) {
-//             indicesToCheck[sectionNumber * maxCircleOverlap + writePos] = i;
-//             writePos++;
-//         }
-//     }
-
-
-//     if (threadId == 0) {
-//         uint lastOutput = exclusiveScanOutput[SCAN_BLOCK_DIM - 1];
-//         uint lastInput = exclusiveScanInput[SCAN_BLOCK_DIM - 1];
-//         uint total = lastOutput + lastInput;
-//         circlesPerSection[sectionNumber] = total;
-//     }
-// }
-
-
 __global__ void prerender_circles_parallel() {
     int imageWidth = cuConstRendererParams.imageWidth;
     int imageHeight = cuConstRendererParams.imageHeight;
@@ -755,25 +691,14 @@ __global__ void prerender_circles_parallel() {
     int startCircle = threadId * circlesPerThread;
     int endCircle = min(startCircle + circlesPerThread, numCircles);
     
-    // Create local array to track circles for this thread
-    // Each thread only needs to track its own circles
-    bool circleInBoxLocal[32];  // Size based on max circlesPerThread
-    int localCircleIndices[32]; // To store the indices of circles that overlap
-    
-    // First pass: check circles and store results locally
-    int localCount = 0;
     for (int i = startCircle; i < endCircle; i++) {
         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
         float radius = cuConstRendererParams.radius[i];
         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-            if (localCount < 32) {  // Prevent array overflow
-                circleInBoxLocal[localCount] = true;
-                localCircleIndices[localCount] = i;
-                localCount++;
-            }
+            circleInBoxFlags[(sectionNumber * numCircles) + i] = true;
+            thisThreadCirclesProcessed++;
         }
     }
-    thisThreadCirclesProcessed = localCount;
 
     // Store count in scan input
     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
@@ -783,23 +708,25 @@ __global__ void prerender_circles_parallel() {
     __syncthreads();
 
     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-    
-    // Write circle indices to global memory using scan output
+
     int writePos = exclusiveScanOutput[threadId];
-    for (int i = 0; i < localCount; i++) {
-        if (writePos + i < maxCircleOverlap) {
-            indicesToCheck[sectionNumber * maxCircleOverlap + writePos + i] = localCircleIndices[i];
+    int circlesWritten = 0;
+    for (int i = startCircle; i < endCircle; i++) {
+        if (circleInBoxFlags[sectionNumber * numCircles + i]) {
+            indicesToCheck[sectionNumber * maxCircleOverlap + writePos] = i;
+            writePos++;
         }
     }
 
-    // Store total count for this section
+
     if (threadId == 0) {
         uint lastOutput = exclusiveScanOutput[SCAN_BLOCK_DIM - 1];
         uint lastInput = exclusiveScanInput[SCAN_BLOCK_DIM - 1];
         uint total = lastOutput + lastInput;
-        circlesPerSection[sectionNumber] = min(total, (uint)maxCircleOverlap);
+        circlesPerSection[sectionNumber] = total;
     }
 }
+
 
 // __global__ void prerender_circles() {
 //     // printf("Prerendering circles\n");
@@ -1122,7 +1049,7 @@ void CudaRenderer::render() {
     int sectionSize = 32;
     int numSectionsX = (image->width + sectionSize - 1) / sectionSize;
     int numSectionsY = (image->height + sectionSize - 1) / sectionSize;
-    dim3 prerenderBlockDim(sectionSize, sectionSize, 1);
+    dim3 prerenderBlockDim(32, 32, 1);
     dim3 prerenderGridDim(numSectionsX, numSectionsY);
     // dim3 prerenderGridDim(numSectionsX, numSectionsY);
 
@@ -1138,4 +1065,3 @@ void CudaRenderer::render() {
     cudaCheckError(cudaGetLastError());
     cudaDeviceSynchronize();
 }
-
