@@ -38,14 +38,8 @@ inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
 
-__device__ int* deviceSectionCircleCounts = nullptr;
-__device__ int* deviceSectionCircleLists = nullptr;
-
-__device__ bool* circleInBoxFlags = nullptr;
 __device__ int* indicesToCheck = nullptr;
 __device__ int* circlesPerSection = nullptr;
-
-
 
 
 struct GlobalConstants {
@@ -462,8 +456,6 @@ __global__ void kernelRenderCircles() {
     }
 }
 
-
-
 __global__ void manat_render_circles_sectioned_parallel() {
     
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
@@ -478,7 +470,6 @@ __global__ void manat_render_circles_sectioned_parallel() {
                                             invHeight * (static_cast<float>(pixelY) + 0.5f));
     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
 
-    // int numCircles = cuConstRendererParams.numCircles;
     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
 
     float boxL = invWidth * pixelX - 0.5f;
@@ -489,7 +480,6 @@ __global__ void manat_render_circles_sectioned_parallel() {
     for (int i = 0; i < circlesPerSection[sectionNumber]; i++) {
         int circleIndex = indicesToCheck[sectionNumber * maxCircleOverlap + i];
         int index3 = 3 * circleIndex;
-
         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
         float rad = cuConstRendererParams.radius[circleIndex];
         if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
@@ -497,239 +487,6 @@ __global__ void manat_render_circles_sectioned_parallel() {
         }
     }
 }
-
-
-
-// __global__ void manat_render_circles_sectioned() {
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-//     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
-//     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-//     short imageWidth = cuConstRendererParams.imageWidth;
-//     short imageHeight = cuConstRendererParams.imageHeight;
-    
-//     if (pixelX >= imageWidth || pixelY >= imageHeight)
-//         return;
-
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-//     float invWidth = 1.f / cuConstRendererParams.imageWidth;
-//     float invHeight = 1.f / cuConstRendererParams.imageHeight;
-//     float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-//                                             invHeight * (static_cast<float>(pixelY) + 0.5f));
-//     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
-
-//     int numCircles = cuConstRendererParams.numCircles;
-
-//     float boxL = invWidth * pixelX - 0.5f;
-//     float boxR = invWidth * (pixelX + 1) + 0.5f;
-//     float boxB = invHeight * pixelY - 0.5f;
-//     float boxT = invHeight * (pixelY + 1) + 0.5f;
-    
-
-//     for (int count = 0; count < deviceSectionCircleCounts[sectionNumber]; count++) {
-//         int circleIndex = deviceSectionCircleLists[sectionNumber * maxCircleOverlap + count];
-//         int index3 = 3 * circleIndex;
-
-//         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-//         float  rad = cuConstRendererParams.radius[circleIndex];
-
-//         if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
-//             shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
-//         }
-//     }
-// }
-
-__global__ void manat_render_circles() {
-    
-    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
-    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-    short imageWidth = cuConstRendererParams.imageWidth;
-    short imageHeight = cuConstRendererParams.imageHeight;
-
-
-    if (pixelX >= imageWidth || pixelY >= imageHeight)
-        return;
-
-
-    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
-        int index3 = 3 * circleIndex;
-        
-        // read position and radius
-        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-        float  rad = cuConstRendererParams.radius[circleIndex];
-
-        // float boxL = p.x - rad;
-        // float boxR = p.x + rad;
-        // float boxB = p.y - rad;
-        // float boxT = p.y + rad;
-
-
-        // if (!circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
-        //     continue;  // Skip this circle if it can't intersect
-        // }
-
-        // // If needed, apply the exact intersection test
-        // if (!circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
-        //     continue;  // Skip this circle if exact test fails
-        // }
-
-        float invWidth = 1.f / cuConstRendererParams.imageWidth;
-        float invHeight = 1.f / cuConstRendererParams.imageHeight;
-        // float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-        //                                     invHeight * (static_cast<float>(pixelY) + 0.5f));
-        
-        // float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
-        // shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
-        // imgPtr++;
-        
-        float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                            invHeight * (static_cast<float>(pixelY) + 0.5f));
-        
-        float diffX = p.x - pixelCenterNorm.x;
-        float diffY = p.y - pixelCenterNorm.y;
-        float pixelDist = diffX * diffX + diffY * diffY;
-        
-        if (pixelDist <= rad * rad) {
-            float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
-            shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
-            imgPtr++;
-        }
-    }
-}
-
-// __global__ void prerender_circles_parallel() {
-//     // printf("Prerendering circles\n");
-//     int imageWidth = cuConstRendererParams.imageWidth;
-//     int imageHeight = cuConstRendererParams.imageHeight;
-//     int numCircles = cuConstRendererParams.numCircles;
-//     int sectionSize = cuConstRendererParams.sectionSize; //find way to make this dynamic
-//     int numSectionsX = cuConstRendererParams.numSectionsX;
-//     int numSectionsY = cuConstRendererParams.numSectionsY;
-
-//     int sectionX = blockIdx.x;
-//     int sectionY = blockIdx.y;
-//     if (sectionX >= numSectionsX || sectionY >= numSectionsY) {
-//         return;
-//     }
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-
-//     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
-//     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
-//     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
-//     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-
-//     __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
-
-//     int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-//     exclusiveScanInput[threadId] = 0;
-
-//     int totalThreadCount = blockDim.x * blockDim.y;
-//     uint totalThreads = (uint)totalThreadCount;
-
-//     int thisThreadCirclesProcessed = 0;
-//     int circlesPerThread = (numCircles + totalThreadCount - 1) / totalThreadCount;
-//     int startCircle = threadId * circlesPerThread;
-//     if (startCircle >= numCircles) {
-//         return;
-//     }
-//     int endCircle = min(startCircle + circlesPerThread, numCircles);
-
-//     for (int i = startCircle; i < endCircle; i++) {
-//         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
-//         float radius = cuConstRendererParams.radius[i];
-//         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-//             circleInBoxFlags[(sectionNumber * numCircles) + i] = true;
-//             thisThreadCirclesProcessed = thisThreadCirclesProcessed + 1;
-//         }
-//     }
-//     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
-//     __syncthreads();
-
-//     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
-//     __syncthreads();
-
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-//     // printf("maxCircleOverlap: %d\n", maxCircleOverlap);
-//     if (thisThreadCirclesProcessed > 0 && startCircle < numCircles) {
-//         int writePos = exclusiveScanOutput[threadId];
-//         printf("writePos: %d\n", writePos);
-//         printf("Last element of exclusiveScanOutput: %d\n", exclusiveScanOutput[totalThreadCount - 1]);
-//         for (int i = startCircle; i < endCircle; i++) {
-//             if (circleInBoxFlags[sectionNumber * numCircles + i]) {
-//                 indicesToCheck[sectionNumber * maxCircleOverlap + writePos] = i;
-//                 writePos++;
-//             }
-//         }
-//     }
-
-//     if (threadId == 0) {
-//         if (exclusiveScanOutput[totalThreadCount - 1] > 0) {
-//             printf("GREATER");
-//         }
-//         circlesPerSection[sectionNumber] = exclusiveScanOutput[totalThreadCount - 1] + exclusiveScanInput[totalThreadCount - 1];
-//     }
-// }
-
-// __global__ void prerender_circles_parallel() {
-//     int imageWidth = cuConstRendererParams.imageWidth;
-//     int imageHeight = cuConstRendererParams.imageHeight;
-//     int numCircles = cuConstRendererParams.numCircles;
-//     int sectionSize = cuConstRendererParams.sectionSize;
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-
-//     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
-//     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
-//     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
-//     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-
-//     __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
-
-//     int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-    
-//     int thisThreadCirclesProcessed = 0;
-//     int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
-//     int startCircle = threadId * circlesPerThread;
-//     int endCircle = min(startCircle + circlesPerThread, numCircles);
-
-    
-//     for (int i = startCircle; i < endCircle; i++) {
-//         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
-//         float radius = cuConstRendererParams.radius[i];
-//         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-//             circleInBoxFlags[(sectionNumber * numCircles) + i] = true;
-//             thisThreadCirclesProcessed++;
-//         }
-//     }
-
-//     // Store count in scan input
-//     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
-//     __syncthreads();
-    
-//     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
-//     __syncthreads();
-
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-
-//     int writePos = exclusiveScanOutput[threadId];
-//     int circlesWritten = 0;
-//     for (int i = startCircle; i < endCircle; i++) {
-//         if (circleInBoxFlags[sectionNumber * numCircles + i]) {
-//             indicesToCheck[sectionNumber * maxCircleOverlap + writePos] = i;
-//             writePos++;
-//         }
-//     }
-
-
-//     if (threadId == 0) {
-//         uint lastOutput = exclusiveScanOutput[SCAN_BLOCK_DIM - 1];
-//         uint lastInput = exclusiveScanInput[SCAN_BLOCK_DIM - 1];
-//         uint total = lastOutput + lastInput;
-//         circlesPerSection[sectionNumber] = total;
-//     }
-// }
 
 
 __global__ void prerender_circles_parallel() {
@@ -748,102 +505,110 @@ __global__ void prerender_circles_parallel() {
     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
 
-    int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-    
+    int threadId = threadIdx.y * blockDim.x + threadIdx.x; //as specified in the exclusive scan handout
+    int localCircleIndices[256];
     int thisThreadCirclesProcessed = 0;
     int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
     int startCircle = threadId * circlesPerThread;
     int endCircle = min(startCircle + circlesPerThread, numCircles);
-    
-    // Create local array to track circles for this thread
-    // Each thread only needs to track its own circles
-    bool circleInBoxLocal[32];  // Size based on max circlesPerThread
-    int localCircleIndices[32]; // To store the indices of circles that overlap
-    
-    // First pass: check circles and store results locally
-    int localCount = 0;
+
     for (int i = startCircle; i < endCircle; i++) {
         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
         float radius = cuConstRendererParams.radius[i];
         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-            if (localCount < 32) {  // Prevent array overflow
-                circleInBoxLocal[localCount] = true;
-                localCircleIndices[localCount] = i;
-                localCount++;
-            }
+            localCircleIndices[thisThreadCirclesProcessed] = i;
+            thisThreadCirclesProcessed++;
         }
     }
-    thisThreadCirclesProcessed = localCount;
-
-    // Store count in scan input
     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
     __syncthreads();
-    
     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
     __syncthreads();
 
     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-    
-    // Write circle indices to global memory using scan output
     int writePos = exclusiveScanOutput[threadId];
-    for (int i = 0; i < localCount; i++) {
-        if (writePos + i < maxCircleOverlap) {
-            indicesToCheck[sectionNumber * maxCircleOverlap + writePos + i] = localCircleIndices[i];
-        }
+    for (int i = 0; i < thisThreadCirclesProcessed; i++) {
+        indicesToCheck[sectionNumber * maxCircleOverlap + writePos + i] = localCircleIndices[i];
     }
 
-    // Store total count for this section
     if (threadId == 0) {
-        uint lastOutput = exclusiveScanOutput[SCAN_BLOCK_DIM - 1];
-        uint lastInput = exclusiveScanInput[SCAN_BLOCK_DIM - 1];
-        uint total = lastOutput + lastInput;
-        circlesPerSection[sectionNumber] = min(total, (uint)maxCircleOverlap);
+        circlesPerSection[sectionNumber] = exclusiveScanOutput[SCAN_BLOCK_DIM - 1] + exclusiveScanInput[SCAN_BLOCK_DIM - 1];
     }
 }
 
-// __global__ void prerender_circles() {
-//     // printf("Prerendering circles\n");
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-//     int imageWidth = cuConstRendererParams.imageWidth;
-//     int imageHeight = cuConstRendererParams.imageHeight;
-//     int numCircles = cuConstRendererParams.numCircles;
-//     int sectionSize = 16; //find way to make this dynamic
+__global__ void mixed_prerender_and_render() {
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+    int numCircles = cuConstRendererParams.numCircles;
+    int sectionSize = cuConstRendererParams.sectionSize;
+    int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
 
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-//     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
-//     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
-//     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
-//     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-
-//     int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-//     int totalThreadCount = blockDim.x * blockDim.y;
+    float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
+    float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
+    float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
+    float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
+    int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
     
-//     // __shared__ int thisBlockCirclesProcessed;
-//     // if (threadId == 0) {
-//     //     thisBlockCirclesProcessed = 0;
-//     // }
-//     int thisBlockCirclesProcessed = 0;
+    __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
+    __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
+    __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
+    __shared__ int thisSectionCircleIndices[5000];
+    __shared__ int circlesPerSection;
 
-//     // __syncthreads();
+    int threadId = threadIdx.y * blockDim.x + threadIdx.x; //as specified in the exclusive scan handout
+    int localCircleIndices[128];
+    int thisThreadCirclesProcessed = 0;
+    int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
+    int startCircle = threadId * circlesPerThread;
+    int endCircle = min(startCircle + circlesPerThread, numCircles);
 
-//     // int circlesPerThread = (numCircles + totalThreadCount - 1) / totalThreadCount;
-//     // int startCircle = threadId * circlesPerThread;
-//     // int endCircle = min(startCircle + circlesPerThread, numCircles);
-//     int startCircle = 0;
-//     int endCircle = numCircles;
+    for (int i = startCircle; i < endCircle; i++) {
+        float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
+        float radius = cuConstRendererParams.radius[i];
+        if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
+            localCircleIndices[thisThreadCirclesProcessed] = i;
+            thisThreadCirclesProcessed++;
+        }
+    }
+    exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
+    __syncthreads();
+    sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
+    __syncthreads();
 
-//     for (int i = startCircle; i < endCircle; i++) {
-//         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
-//         float radius = cuConstRendererParams.radius[i];
-//         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-//             // int offset = atomicAdd(&thisBlockCirclesProcessed, 1);
-//             int offset = thisBlockCirclesProcessed++;
-//             deviceSectionCircleLists[sectionNumber * maxCircleOverlap + offset] = i;
-//         }
-//     }
-//     deviceSectionCircleCounts[sectionNumber] = thisBlockCirclesProcessed;
+    int writePos = exclusiveScanOutput[threadId];
+    for (int i = 0; i < thisThreadCirclesProcessed; i++) {
+        thisSectionCircleIndices[writePos + i] = localCircleIndices[i];
+    }
 
-// }
+    if (threadId == 0) {
+        circlesPerSection = min(exclusiveScanOutput[SCAN_BLOCK_DIM - 1] + exclusiveScanInput[SCAN_BLOCK_DIM - 1], (uint)maxCircleOverlap);
+    }
+    __syncthreads();
+
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    float invWidth = 1.f / cuConstRendererParams.imageWidth;
+    float invHeight = 1.f / cuConstRendererParams.imageHeight;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                            invHeight * (static_cast<float>(pixelY) + 0.5f));
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
+
+
+    float boxL = invWidth * pixelX - 0.5f;
+    float boxR = invWidth * (pixelX + 1) + 0.5f;
+    float boxB = invHeight * pixelY - 0.5f;
+    float boxT = invHeight * (pixelY + 1) + 0.5f;
+    
+    for (int i = 0; i < circlesPerSection; i++) {
+        int circleIndex = thisSectionCircleIndices[i];
+        int index3 = 3 * circleIndex;
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIndex];
+        if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+            shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+        }
+    }
+}
 
 
 
@@ -885,7 +650,6 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
-        cudaFree(circleInBoxFlags);
     }
 }
 
@@ -960,40 +724,14 @@ CudaRenderer::setup() {
 
     int maxCircleOverlap = 5000; //change to 2000 if want working no OOM
 
-    // // bool* hostCircleInBoxFlags = new bool[numSections * numCircles]();
-    // cudaMalloc(&circleInBoxFlags, sizeof(bool) * numSections * numCircles);
-    // cudaCheckError(cudaGetLastError());
-
-    // cudaMemset(circleInBoxFlags, 0, sizeof(bool) * numSections * numCircles);
-    // cudaCheckError(cudaGetLastError());
-
-    bool* deviceCircleInBoxFlags;
-    cudaMalloc(&deviceCircleInBoxFlags, sizeof(bool) * numSections * numCircles);
-    cudaCheckError(cudaGetLastError());
-
-    cudaMemset(deviceCircleInBoxFlags, 0, sizeof(bool) * numSections * numCircles);
-    cudaCheckError(cudaGetLastError());
-
-    // Now copy the pointer value to the __device__ variable
-    cudaMemcpyToSymbol(circleInBoxFlags, &deviceCircleInBoxFlags, sizeof(bool*));
-    cudaCheckError(cudaGetLastError());
-
     bool* deviceIndicesToCheck;
-    cudaMalloc(&deviceIndicesToCheck, sizeof(int) * numSections * maxCircleOverlap);
-    cudaCheckError(cudaGetLastError());
-
-    cudaMemset(deviceIndicesToCheck, 0, sizeof(int) * numSections * maxCircleOverlap);
-    cudaCheckError(cudaGetLastError());
-
-    cudaMemcpyToSymbol(indicesToCheck, &deviceIndicesToCheck, sizeof(int *));
-    cudaCheckError(cudaGetLastError());
+    cudaCheckError(cudaMalloc(&deviceIndicesToCheck, sizeof(int) * numSections * maxCircleOverlap));
+    cudaCheckError(cudaMemset(deviceIndicesToCheck, 0, sizeof(int) * numSections * maxCircleOverlap));
+    cudaCheckError(cudaMemcpyToSymbol(indicesToCheck, &deviceIndicesToCheck, sizeof(int *)));
 
     int* deviceCirclesPerSection;
-    cudaMalloc(&deviceCirclesPerSection, sizeof(int) * numSections);
-    cudaCheckError(cudaGetLastError());
-
-    cudaMemcpyToSymbol(circlesPerSection, &deviceCirclesPerSection, sizeof(int*));
-    cudaCheckError(cudaGetLastError());
+    cudaCheckError(cudaMalloc(&deviceCirclesPerSection, sizeof(int) * numSections));
+    cudaCheckError(cudaMemcpyToSymbol(circlesPerSection, &deviceCirclesPerSection, sizeof(int*)));
 
 
     // Initialize parameters in constant memory.  We didn't talk about
@@ -1105,16 +843,6 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
-// void
-// CudaRenderer::render() {
-
-//     // 256 threads per block is a healthy number
-//     dim3 blockDim(256, 1);
-//     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
-
-//     kernelRenderCircles<<<gridDim, blockDim>>>();
-//     cudaDeviceSynchronize();
-// }
 
 
 void CudaRenderer::render() {
@@ -1124,18 +852,18 @@ void CudaRenderer::render() {
     int numSectionsY = (image->height + sectionSize - 1) / sectionSize;
     dim3 prerenderBlockDim(sectionSize, sectionSize, 1);
     dim3 prerenderGridDim(numSectionsX, numSectionsY);
+    mixed_prerender_and_render<<<prerenderGridDim, prerenderBlockDim>>>();
+    // dim3 prerenderBlockDim(sectionSize, sectionSize, 1);
     // dim3 prerenderGridDim(numSectionsX, numSectionsY);
 
-    prerender_circles_parallel<<<prerenderGridDim, prerenderBlockDim>>>();
-    cudaDeviceSynchronize();
-    cudaCheckError(cudaGetLastError());
+    // prerender_circles_parallel<<<prerenderGridDim, prerenderBlockDim>>>();
+    // cudaCheckError(cudaDeviceSynchronize());
 
-    dim3 blockDim(sectionSize, sectionSize, 1);
-    int gridXDim = (image->width + blockDim.x - 1) / blockDim.x;
-    int gridYDim = (image->height + blockDim.y - 1) / blockDim.y;
-    dim3 gridDim(gridXDim, gridYDim);
-    manat_render_circles_sectioned_parallel<<<gridDim, blockDim>>>();
-    cudaCheckError(cudaGetLastError());
-    cudaDeviceSynchronize();
+    // dim3 blockDim(sectionSize, sectionSize, 1);
+    // int gridXDim = (image->width + blockDim.x - 1) / blockDim.x;
+    // int gridYDim = (image->height + blockDim.y - 1) / blockDim.y;
+    // dim3 gridDim(gridXDim, gridYDim);
+    // manat_render_circles_sectioned_parallel<<<gridDim, blockDim>>>();
+    // cudaCheckError(cudaDeviceSynchronize());
 }
 
