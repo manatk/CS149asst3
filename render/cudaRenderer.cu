@@ -387,7 +387,6 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
         // simple: each circle has an assigned color
         int index3 = 3 * circleIndex;
         rgb = *(float3*)&(cuConstRendererParams.color[index3]);
-        printf("rgb: %f, %f, %f\n", rgb.x, rgb.y, rgb.z);
         alpha = .5f;
     }
 
@@ -457,27 +456,57 @@ __global__ void kernelRenderCircles() {
     }
 }
 
-__global__ void mixed_prerender_and_render_test() {
+__global__ void manat_render_circles_sectioned_parallel() {
+    
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+
+    int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
+    float invWidth = 1.f / cuConstRendererParams.imageWidth;
+    float invHeight = 1.f / cuConstRendererParams.imageHeight;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                            invHeight * (static_cast<float>(pixelY) + 0.5f));
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
+
+    int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
+
+    float boxL = invWidth * pixelX - 0.5f;
+    float boxR = invWidth * (pixelX + 1) + 0.5f;
+    float boxB = invHeight * pixelY - 0.5f;
+    float boxT = invHeight * (pixelY + 1) + 0.5f;
+    
+    for (int i = 0; i < circlesPerSection[sectionNumber]; i++) {
+        int circleIndex = indicesToCheck[sectionNumber * maxCircleOverlap + i];
+        int index3 = 3 * circleIndex;
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIndex];
+        if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+            shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+        }
+    }
+}
+
+
+__global__ void prerender_circles_parallel() {
     int imageWidth = cuConstRendererParams.imageWidth;
     int imageHeight = cuConstRendererParams.imageHeight;
     int numCircles = cuConstRendererParams.numCircles;
     int sectionSize = cuConstRendererParams.sectionSize;
     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
 
-    // Bounds for the section in normalized coordinates
     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-    
+
     __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
-    __shared__ int thisSectionCircleIndices[5000];  // Ensure this fits in shared memory
-    __shared__ int circlesPerSection;
 
-    int threadId = threadIdx.y * blockDim.x + threadIdx.x;
-    int localCircleIndices[128];
+    int threadId = threadIdx.y * blockDim.x + threadIdx.x; //as specified in the exclusive scan handout
+    int localCircleIndices[32];
     int thisThreadCirclesProcessed = 0;
     int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
     int startCircle = threadId * circlesPerThread;
@@ -487,224 +516,25 @@ __global__ void mixed_prerender_and_render_test() {
         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
         float radius = cuConstRendererParams.radius[i];
         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-            localCircleIndices[thisThreadCirclesProcessed++] = i;
+            localCircleIndices[thisThreadCirclesProcessed] = i;
+            thisThreadCirclesProcessed++;
         }
     }
-
     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
     __syncthreads();
     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
     __syncthreads();
 
+    int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
     int writePos = exclusiveScanOutput[threadId];
     for (int i = 0; i < thisThreadCirclesProcessed; i++) {
-        thisSectionCircleIndices[writePos + i] = localCircleIndices[i];
+        indicesToCheck[sectionNumber * maxCircleOverlap + writePos + i] = localCircleIndices[i];
     }
 
     if (threadId == 0) {
-        circlesPerSection = min(exclusiveScanOutput[SCAN_BLOCK_DIM - 1] + exclusiveScanInput[SCAN_BLOCK_DIM - 1], cuConstRendererParams.maxCircleOverlap);
+        circlesPerSection[sectionNumber] = exclusiveScanOutput[SCAN_BLOCK_DIM - 1] + exclusiveScanInput[SCAN_BLOCK_DIM - 1];
     }
-    __syncthreads();
-
-    // Position within the image grid
-    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
-    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-
-    float invWidth = 1.f / imageWidth;
-    float invHeight = 1.f / imageHeight;
-    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                            invHeight * (static_cast<float>(pixelY) + 0.5f));
-    // float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
-    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-    float4 existingColor = *imgPtr;
-    
-    float3 accumulated_rgb = make_float3(0.0f, 0.0f, 0.0f);
-    float accumulated_alpha = 0.0f;
-
-    for (int i = 0; i < circlesPerSection; i++) {
-        int circleIndex = thisSectionCircleIndices[i];
-        int index3 = 3 * circleIndex;
-        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-        float rad = cuConstRendererParams.radius[circleIndex];
-
-        float diffX = p.x - pixelCenterNorm.x;
-        float diffY = p.y - pixelCenterNorm.y;
-        float pixelDist = diffX * diffX + diffY * diffY;
-        float maxDist = rad * rad;
-
-        if (pixelDist > maxDist) continue;
-
-        // Determine RGB and alpha for current circle
-        float3 rgb;
-        float alpha;
-
-        if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
-            const float kCircleMaxAlpha = .5f;
-            const float falloffScale = 4.f;
-
-            float normPixelDist = sqrtf(pixelDist) / rad;
-            rgb = lookupColor(normPixelDist);
-
-            float maxAlpha = .6f + .4f * (1.f - p.z);
-            maxAlpha = kCircleMaxAlpha * fminf(fmaxf(maxAlpha, 0.f), 1.f);
-            alpha = maxAlpha * expf(-falloffScale * normPixelDist * normPixelDist);
-
-        } else {
-            // Simple: each circle has an assigned color
-            rgb = *(float3*)&(cuConstRendererParams.color[index3]);
-            // printf("index3: %d\n", index3);
-            alpha = 0.5f;
-        }
-
-        // Blend circle color with accumulated color
-        float oneMinusAlpha = 1.f - alpha;
-        // printf("rgb: %f, %f, %f\n", rgb.x, rgb.y, rgb.z);
-
-        accumulated_rgb.x = alpha * rgb.x + oneMinusAlpha * accumulated_rgb.x;
-        accumulated_rgb.y = alpha * rgb.y + oneMinusAlpha * accumulated_rgb.y;
-        accumulated_rgb.z = alpha * rgb.z + oneMinusAlpha * accumulated_rgb.z;
-        accumulated_alpha = alpha + accumulated_alpha * oneMinusAlpha;
-        printf("accumulated_rgb: %f, %f, %f\n", accumulated_rgb.x, accumulated_rgb.y, accumulated_rgb.z);
-    }
-
-    // Write final color to global memory
-    // float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-    // printf("pixelX: %d, pixelY: %d\n", pixelX, pixelY);
-    // printf("rgb: %f, %f, %f\n", accumulated_rgb.x, accumulated_rgb.y, accumulated_rgb.z);
-    if (accumulated_alpha > 0.0f) {
-        printf("accumulated_alpha: %f\n", accumulated_alpha);
-        printf("accumulated rgb.x: %f\n", accumulated_rgb.x);
-        printf("accumulated rgb.y: %f\n", accumulated_rgb.y);
-        printf("accumulated rgb.z: %f\n", accumulated_rgb.z);
-    }
-    int pixelIndex = 4 * (pixelY * imageWidth + pixelX);  // Index in RGBA format
-    cuConstRendererParams.imageData[pixelIndex + 0] = accumulated_rgb.x;
-    cuConstRendererParams.imageData[pixelIndex + 1] = accumulated_rgb.y;
-    cuConstRendererParams.imageData[pixelIndex + 2] = accumulated_rgb.z;
-    cuConstRendererParams.imageData[pixelIndex + 3] = accumulated_alpha;
-
 }
-
-
-// __global__ void manat_render_circles_sectioned_parallel() {
-    
-//     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
-//     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
-//     short imageWidth = cuConstRendererParams.imageWidth;
-//     short imageHeight = cuConstRendererParams.imageHeight;
-
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-//     float invWidth = 1.f / cuConstRendererParams.imageWidth;
-//     float invHeight = 1.f / cuConstRendererParams.imageHeight;
-//     float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-//                                             invHeight * (static_cast<float>(pixelY) + 0.5f));
-//     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
-
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-
-//     float boxL = invWidth * pixelX - 0.5f;
-//     float boxR = invWidth * (pixelX + 1) + 0.5f;
-//     float boxB = invHeight * pixelY - 0.5f;
-//     float boxT = invHeight * (pixelY + 1) + 0.5f;
-
-//     float3 accumulated_rgb = make_float3(0.0f, 0.0f, 0.0f);
-//     float accumulated_alpha = 0.0f;
-
-//     for (int i = 0; i < circlesPerSection; i++) {
-//         int circleIndex = thisSectionCircleIndices[i];
-//         int index3 = 3 * circleIndex;
-//         float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-//         float rad = cuConstRendererParams.radius[circleIndex];
-
-//         float diffX = p.x - pixelCenterNorm.x;
-//         float diffY = p.y - pixelCenterNorm.y;
-//         float pixelDist = diffX * diffX + diffY * diffY;
-//         float maxDist = rad * rad;
-
-//         if (pixelDist > maxDist) continue;
-
-//         // Determine RGB and alpha for current circle
-//         float3 rgb;
-//         float alpha;
-
-//         if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
-//             const float kCircleMaxAlpha = .5f;
-//             const float falloffScale = 4.f;
-
-//             float normPixelDist = sqrtf(pixelDist) / rad;
-//             rgb = lookupColor(normPixelDist);
-
-//             float maxAlpha = .6f + .4f * (1.f - p.z);
-//             maxAlpha = kCircleMaxAlpha * fminf(fmaxf(maxAlpha, 0.f), 1.f);
-//             alpha = maxAlpha * expf(-falloffScale * normPixelDist * normPixelDist);
-
-//         } else {
-//             // Simple: each circle has an assigned color
-//             rgb = *(float3*)&(cuConstRendererParams.color[index3]);
-//             alpha = 0.5f;
-//         }
-
-//         // Blend circle color with accumulated color
-//         float oneMinusAlpha = 1.f - alpha;
-//         accumulated_rgb.x = alpha * rgb.x + oneMinusAlpha * accumulated_rgb.x;
-//         accumulated_rgb.y = alpha * rgb.y + oneMinusAlpha * accumulated_rgb.y;
-//         accumulated_rgb.z = alpha * rgb.z + oneMinusAlpha * accumulated_rgb.z;
-//         accumulated_alpha = alpha + accumulated_alpha * oneMinusAlpha;
-//     }
-
-//     // Write final color to global memory
-//     float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-//     *imgPtr = make_float4(accumulated_rgb.x, accumulated_rgb.y, accumulated_rgb.z, accumulated_alpha);
-// }
-    
-
-
-// __global__ void prerender_circles_parallel() {
-//     int imageWidth = cuConstRendererParams.imageWidth;
-//     int imageHeight = cuConstRendererParams.imageHeight;
-//     int numCircles = cuConstRendererParams.numCircles;
-//     int sectionSize = cuConstRendererParams.sectionSize;
-//     int sectionNumber = blockIdx.y * gridDim.x + blockIdx.x;
-
-//     float startX = (float)(blockIdx.x * sectionSize) / imageWidth;
-//     float endX = (float)(min((blockIdx.x + 1) * sectionSize, imageWidth)) / imageWidth;
-//     float startY = (float)(blockIdx.y * sectionSize) / imageHeight;
-//     float endY = (float)(min((blockIdx.y + 1) * sectionSize, imageHeight)) / imageHeight;
-
-//     __shared__ uint exclusiveScanInput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanOutput[SCAN_BLOCK_DIM];
-//     __shared__ uint exclusiveScanScratch[2 * SCAN_BLOCK_DIM];
-
-//     int threadId = threadIdx.y * blockDim.x + threadIdx.x; //as specified in the exclusive scan handout
-//     int localCircleIndices[256];
-//     int thisThreadCirclesProcessed = 0;
-//     int circlesPerThread = (numCircles + SCAN_BLOCK_DIM - 1) / SCAN_BLOCK_DIM;
-//     int startCircle = threadId * circlesPerThread;
-//     int endCircle = min(startCircle + circlesPerThread, numCircles);
-
-//     for (int i = startCircle; i < endCircle; i++) {
-//         float3 position = *(float3*)(&cuConstRendererParams.position[3 * i]);
-//         float radius = cuConstRendererParams.radius[i];
-//         if (circleInBoxConservative(position.x, position.y, radius, startX, endX, endY, startY)) {
-//             localCircleIndices[thisThreadCirclesProcessed] = i;
-//             thisThreadCirclesProcessed++;
-//         }
-//     }
-//     exclusiveScanInput[threadId] = thisThreadCirclesProcessed;
-//     __syncthreads();
-//     sharedMemExclusiveScan(threadId, exclusiveScanInput, exclusiveScanOutput, exclusiveScanScratch, SCAN_BLOCK_DIM);
-//     __syncthreads();
-
-//     int maxCircleOverlap = cuConstRendererParams.maxCircleOverlap;
-//     int writePos = exclusiveScanOutput[threadId];
-//     for (int i = 0; i < thisThreadCirclesProcessed; i++) {
-//         indicesToCheck[sectionNumber * maxCircleOverlap + writePos + i] = localCircleIndices[i];
-//     }
-
-//     if (threadId == 0) {
-//         circlesPerSection[sectionNumber] = exclusiveScanOutput[SCAN_BLOCK_DIM - 1] + exclusiveScanInput[SCAN_BLOCK_DIM - 1];
-//     }
-// }
 
 __global__ void mixed_prerender_and_render() {
     int imageWidth = cuConstRendererParams.imageWidth;
@@ -755,25 +585,103 @@ __global__ void mixed_prerender_and_render() {
     }
     __syncthreads();
 
+
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
     float invWidth = 1.f / cuConstRendererParams.imageWidth;
     float invHeight = 1.f / cuConstRendererParams.imageHeight;
     float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
                                             invHeight * (static_cast<float>(pixelY) + 0.5f));
-    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
 
 
+    float3 rgb;
+    float alpha;
+    float4 existingColor = make_float4(1.f, 1.f, 1.f, 0.f);
+    if (cuConstRendererParams.sceneName == SNOWFLAKES || 
+        cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+        float shade = .4f + .45f * static_cast<float>(imageHeight-pixelY) / imageHeight;
+        existingColor = make_float4(shade, shade, shade, 1.f);
+    } else {
+        existingColor = make_float4(1.f, 1.f, 1.f, 0.f);
+    }
 
-    for (int i = 0; i < circlesPerSection; i++) {
-        int circleIndex = thisSectionCircleIndices[i];
-        int index3 = 3 * circleIndex;
-        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-        float rad = cuConstRendererParams.radius[circleIndex];
-        if (circleInBox(p.x, p.y, rad, startX, endX, endY, startY)) {
-            shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+    float boxL = invWidth * pixelX;
+    float boxR = invWidth * (pixelX + 1);
+    float boxB = invHeight * pixelY;
+    float boxT = invHeight * (pixelY + 1);
+    
+    if (cuConstRendererParams.sceneName != SNOWFLAKES && cuConstRendererParams.sceneName != SNOWFLAKES_SINGLE_FRAME) {
+        for (int i = 0; i < circlesPerSection; i++) {
+            int circleIndex = thisSectionCircleIndices[i];
+            int index3 = 3 * circleIndex;
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float rad = cuConstRendererParams.radius[circleIndex];
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX * diffX + diffY * diffY;
+
+            if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+                if (pixelDist <= rad * rad) {
+                    rgb = *(float3*)&(cuConstRendererParams.color[index3]);
+                    alpha = .5f;
+                    float oneMinusAlpha = 1.f - alpha;
+                    existingColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
+                    existingColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
+                    existingColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
+                    existingColor.w = alpha + existingColor.w;
+                }
+            }
         }
     }
+
+    if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+        for (int i = 0; i < circlesPerSection; i++) {
+            int circleIndex = thisSectionCircleIndices[i];
+            int index3 = 3 * circleIndex;
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float rad = cuConstRendererParams.radius[circleIndex];
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX * diffX + diffY * diffY;
+
+            if (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB)) {
+                if (pixelDist <= rad * rad) {
+                        
+                    const float kCircleMaxAlpha = .5f;
+                    const float falloffScale = 4.f;
+
+                    float normPixelDist = sqrt(pixelDist) / rad;
+                    rgb = lookupColor(normPixelDist);
+
+                    float maxAlpha = .6f + .4f * (1.f-p.z);
+                    maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // kCircleMaxAlpha * clamped value
+                    alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+
+                      
+                    float oneMinusAlpha = 1.f - alpha;
+                    existingColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
+                    existingColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
+                    existingColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
+                    existingColor.w = alpha + existingColor.w;
+                }
+            }
+        }
+        
+    }
+    
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * cuConstRendererParams.imageWidth + pixelX)]);
+    *imgPtr = existingColor;
+
+    
+    // for (int i = 0; i < circlesPerSection; i++) {
+    //     int circleIndex = thisSectionCircleIndices[i];
+    //     int index3 = 3 * circleIndex;
+    //     float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    //     float rad = cuConstRendererParams.radius[circleIndex];
+    //     if (circleInBox(p.x, p.y, rad, startX, endX, endY, startY)) {
+    //         shadePixel(circleIndex, pixelCenterNorm, p, imgPtr);
+    //     }
+    // }
 }
 
 
@@ -895,9 +803,9 @@ CudaRenderer::setup() {
     cudaCheckError(cudaMemset(deviceIndicesToCheck, 0, sizeof(int) * numSections * maxCircleOverlap));
     cudaCheckError(cudaMemcpyToSymbol(indicesToCheck, &deviceIndicesToCheck, sizeof(int *)));
 
-    // int* deviceCirclesPerSection;
-    // cudaCheckError(cudaMalloc(&deviceCirclesPerSection, sizeof(int) * numSections));
-    // cudaCheckError(cudaMemcpyToSymbol(circlesPerSection, &deviceCirclesPerSection, sizeof(int*)));
+    int* deviceCirclesPerSection;
+    cudaCheckError(cudaMalloc(&deviceCirclesPerSection, sizeof(int) * numSections));
+    cudaCheckError(cudaMemcpyToSymbol(circlesPerSection, &deviceCirclesPerSection, sizeof(int*)));
 
 
     // Initialize parameters in constant memory.  We didn't talk about
@@ -1018,7 +926,7 @@ void CudaRenderer::render() {
     int numSectionsY = (image->height + sectionSize - 1) / sectionSize;
     dim3 prerenderBlockDim(sectionSize, sectionSize, 1);
     dim3 prerenderGridDim(numSectionsX, numSectionsY);
-    mixed_prerender_and_render_test<<<prerenderGridDim, prerenderBlockDim>>>();
+    mixed_prerender_and_render<<<prerenderGridDim, prerenderBlockDim>>>();
     // dim3 prerenderBlockDim(sectionSize, sectionSize, 1);
     // dim3 prerenderGridDim(numSectionsX, numSectionsY);
 
@@ -1032,4 +940,3 @@ void CudaRenderer::render() {
     // manat_render_circles_sectioned_parallel<<<gridDim, blockDim>>>();
     // cudaCheckError(cudaDeviceSynchronize());
 }
-
